@@ -1,0 +1,189 @@
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(stringr)
+library(readr)
+library(DT)
+library(shiny)
+library(bslib)
+
+# Step 1: Load the Dataset
+data <- read_csv("~/Downloads/Group 2 Data Mining Project 1/data_cleaned.csv", show_col_types = FALSE)
+print(dim(data))
+
+```
+
+```{r}
+# Normalize genre columns to create a movie-feature matrix
+movie_genres <- data %>%
+  select(movieId, title, Action:Musical) %>%
+  distinct()
+
+genre_matrix <- as.matrix(movie_genres %>% select(-movieId, -title))
+genre_similarity <- as.matrix(dist(genre_matrix, method = "euclidean"))
+
+# Recommendation function
+recommend_by_genre_names <- function(movie_names, top_n = 50) {
+  normalized_movie_names <- tolower(str_trim(movie_names))
+  movie_genres <- movie_genres %>%
+    mutate(normalized_title = tolower(str_trim(title)))
+  
+  # Get movie IDs for the input movie names
+  movie_ids <- movie_genres %>%
+    filter(normalized_title %in% normalized_movie_names) %>%
+    pull(movieId)
+  
+  if (length(movie_ids) == 0) {
+    return(data.frame(title = NA))
+  }
+  
+  # Compute similarity scores
+  input_indices <- which(movie_genres$movieId %in% movie_ids)
+  avg_similarity_scores <- colMeans(genre_similarity[input_indices, , drop = FALSE])
+  
+  # Generate recommendations without similarity scores in the output
+  recommendations <- movie_genres %>%
+    mutate(similarity = avg_similarity_scores) %>%
+    arrange(similarity) %>% # Sort by similarity (ascending order for Euclidean distance)
+    filter(!(movieId %in% movie_ids)) %>% # Exclude input movies
+    slice_head(n = top_n) %>% # Select top_n recommendations
+    select(title) # Only include the title column for the output
+  
+  return(recommendations)
+}
+
+```
+
+
+
+```{r}
+# UI
+ui <- fluidPage(
+  theme = bs_theme(bg = "#000000", fg = "#FFFFFF", primary = "#800000"),
+  tags$head(tags$style(HTML("
+    #title-panel { 
+        color: white; 
+        background-color: #800000; 
+        padding: 10px; 
+        text-align: center; 
+        font-size: 50px; 
+        font-weight: bold; 
+        font-family: 'Sans-serif';
+    }
+    #footer { 
+        position: fixed;
+        bottom: 0;
+        width: 100%;
+        text-align: center; 
+        color: white; 
+        background-color: #800000; 
+        padding: 10px; 
+        font-size: 14px; 
+    }
+    .dataTable th, .dataTable td { 
+        border: 1px solid white; 
+        color: white; 
+    }
+    .dataTable tr.selected { 
+        background-color: #800000 !important; 
+        color: white !important; 
+    }
+    .dataTable { 
+        margin-top: 20px; 
+        background-color: #000000; 
+        border: 2px solid white; 
+    }
+    body, .container-fluid { 
+        background-color: #000000; 
+    }
+"))),
+  
+  div(id = "title-panel", HTML("🎥🍿 NEXT-FLIX 🍿🎥️")),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h3("🍿Select Movies of your choice🍿", style = "color: #FFFFFF;"),
+      selectizeInput("selected_movies", "Movies:", choices = movie_genres$title, multiple = TRUE),
+      numericInput("num_recommendations", "Number of Recommendations:", value = 10, min = 1, max = 50),
+      actionButton("get_recommendations", "Get Recommendations", class = "btn btn-danger")
+    ),
+    mainPanel(
+      h3("🎥Recommended Movies🎥", style = "color: #FFFFFF;"),
+      div(class = "dataTable", DTOutput("recommendations_table"))
+    )
+  ),
+  
+  div(id = "footer", "Group-2 | In collaboration with Prof. Lucy Nwosu | Data Mining 2024")
+)
+
+# Server
+server <- function(input, output, session) {
+  rv <- reactiveValues(recommendations = NULL)
+  
+  # Step 4: Load the Input File with Movie Lists
+  input_movies <- read_csv("~/Downloads/Group 2 Data Mining Project 1/formatted_movies.csv")
+
+  #Step 5: Process Each Row and Generate Recommendations
+  results <- lapply(seq_along(input_movies$x), function(i) {
+    row <- input_movies$x[i]
+    movie_list <- unlist(strsplit(row, ", "))
+    movie_list <- gsub("^['\"]|['\"]$", "", movie_list)
+    movie_list <- str_trim(movie_list)
+    recommendations <- recommend_by_genre_names(movie_list)
+    recommendations <- paste(recommendations$title, collapse = ", ") # Combine titles into a single string
+    return(data.frame(recommended_movies = recommendations))
+  })
+
+   #Step 6: Combine All Results into a Single DataFrame and Save as CSV
+  final_output <- bind_rows(results)
+  write_csv(final_output, "~/Downloads/Group 2 Data Mining Project 1/recommendations_output.csv")
+
+  # Generate Recommendations for User Input
+  observeEvent(input$get_recommendations, {
+    req(input$selected_movies)  # Ensure movies are selected
+    recommendations <- recommend_by_genre_names(input$selected_movies, input$num_recommendations)
+    rv$recommendations <- recommendations
+    output$recommendations_table <- renderDT(rv$recommendations, options = list(pageLength = 10))
+  })
+  
+  # Step 7: Compute Scores for Actual vs Predicted
+  observe({
+    predicted_movies <- read_csv("~/Downloads/Group 2 Data Mining Project 1/recommendations_output.csv", col_names = c("predicted_movies"))
+    actual_movies <- read_csv("~/Downloads/Group 2 Data Mining Project 1/y_data_comma_separated_corrected.csv", col_names = c("actual_movies"))
+    input_movies <- read_csv("~/Downloads/Group 2 Data Mining Project 1/cleaned_movies.csv", col_names = c("input_movies"))
+    
+    count_common_movies <- function(list1, list2) {
+      list1_split <- str_split(list1, ", ")[[1]] %>% str_trim()
+      list2_split <- str_split(list2, ", ")[[1]] %>% str_trim()
+      length(intersect(list1_split, list2_split))
+    }
+    
+    scores_actual <- mapply(count_common_movies, predicted_movies$predicted_movies, actual_movies$actual_movies)
+    scores_input <- mapply(count_common_movies, predicted_movies$predicted_movies, input_movies$input_movies)
+    
+    sum_actual_predicted <- sum(scores_actual)
+    sum_input_predicted <- sum(scores_input)
+    
+    result_df <- data.frame(
+      row = 1:length(scores_actual),
+      score_actual = scores_actual,
+      score_input = scores_input
+    )
+    
+    write_csv(result_df, "~/Downloads/Group 2 Data Mining Project 1/score_file.csv")
+    
+    print(result_df)
+    cat("                     Sum of scores (Actual vs Predicted): ", sum_actual_predicted, "\n")
+    cat("Sum of scores (Input vs Predicted): ", sum_input_predicted, "\n")
+  })
+}
+
+# Run the App
+shinyApp(ui = ui, server = server)
+
+```
+
+
+
+
